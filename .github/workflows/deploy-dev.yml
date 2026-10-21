@@ -37,7 +37,9 @@ jobs:
           node "$RUNNER_TEMP/adf-tools/node_modules/@microsoft/azure-data-factory-utilities/lib/index" \
             export "$GITHUB_WORKSPACE/adfdev" \
             "/subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DEV_FACTORY" \
-            "$GITHUB_WORKSPACE/build/export"
+            "build/export"
+          test -s build/export/ARMTemplateForFactory.json
+          test -s build/export/ARMTemplateParametersForFactory.json
 
       - name: Prepare Dev pipelines and datasets (infrastructure stays unchanged)
         shell: bash
