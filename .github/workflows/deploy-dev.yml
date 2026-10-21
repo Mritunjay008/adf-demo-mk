@@ -1,0 +1,302 @@
+name: ADF Dev POC
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: adf-dev-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SUBSCRIPTION: 4d070b73-30f5-482d-9606-75f6f000330f
+      RESOURCE_GROUP: rg-adf-poc
+      DEV_FACTORY: adf-poc-dev-mk-001
+      STORAGE_ACCOUNT: stadfpocmk4d070b73
+      STATE_CONTAINER: adf-deployment-state
+      STATE_BLOB: adf-poc-dev-mk-001/inventory.json
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate Dev JSON and generate ARM template (no publishing)
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/adf-tools" --ignore-scripts @microsoft/azure-data-factory-utilities@1.0.3
+          node "$RUNNER_TEMP/adf-tools/node_modules/@microsoft/azure-data-factory-utilities/lib/index" \
+            export "$GITHUB_WORKSPACE/adfdev" \
+            "/subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/$DEV_FACTORY" \
+            "$GITHUB_WORKSPACE/build/export"
+
+      - name: Prepare Dev pipelines and datasets (infrastructure stays unchanged)
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const { DEV_FACTORY, SUBSCRIPTION, RESOURCE_GROUP } = process.env;
+          const read = path => JSON.parse(fs.readFileSync(path, 'utf8'));
+          const write = (path, data) => fs.writeFileSync(path, JSON.stringify(data, null, 2));
+          const template = read('build/export/ARMTemplateForFactory.json');
+          const ignored = ['Microsoft.DataFactory/factories',
+            'Microsoft.DataFactory/factories/linkedServices',
+            'Microsoft.DataFactory/factories/integrationRuntimes'];
+          const desired = [];
+          const requiredRuntimes = new Set();
+          const requiredLinkedServices = new Set();
+          function visit(value, action) {
+            if (!value || typeof value !== 'object') return;
+            action(value);
+            Object.values(value).forEach(child => visit(child, action));
+          }
+          template.resources = template.resources.filter(resource => {
+            if (ignored.includes(resource.type)) return false;
+            if (!['Microsoft.DataFactory/factories/pipelines', 'Microsoft.DataFactory/factories/datasets'].includes(resource.type))
+              throw new Error(`Outside POC scope: ${resource.type}`);
+            return true;
+          });
+          for (const resource of template.resources) {
+            const match = /^\[concat\(parameters\('factoryName'\), '\/([^']+)'\)\]$/.exec(resource.name);
+            if (!match) throw new Error(`Unexpected ARM resource name: ${resource.name}`);
+            const kind = resource.type.split('/').at(-1).toLowerCase();
+            desired.push(`${kind}/${match[1]}`);
+            resource.name = `${DEV_FACTORY}/${match[1]}`;
+          }
+          const ids = new Set(desired);
+          for (const resource of template.resources) {
+            const dependencies = new Set();
+            visit(resource.properties, node => {
+              if (!node.type?.endsWith?.('Reference')) return;
+              if (typeof node.referenceName !== 'string' || node.referenceName.startsWith('@'))
+                throw new Error('This POC supports static references only.');
+              if (node.type === 'IntegrationRuntimeReference') {
+                requiredRuntimes.add(node.referenceName);
+              } else if (node.type === 'LinkedServiceReference') {
+                requiredLinkedServices.add(node.referenceName);
+              } else if (['DatasetReference', 'PipelineReference'].includes(node.type)) {
+                const kind = { DatasetReference: 'datasets', PipelineReference: 'pipelines' }[node.type];
+                if (!ids.has(`${kind}/${node.referenceName}`)) throw new Error(`Missing reference: ${node.referenceName}`);
+                dependencies.add(`[resourceId('Microsoft.DataFactory/factories/${kind}', '${DEV_FACTORY}', '${node.referenceName}')]`);
+              } else throw new Error(`Unsupported reference: ${node.type}`);
+            });
+            const properties = JSON.stringify(resource.properties);
+            if (properties.includes('pipeline().globalParameters'))
+              throw new Error('Factory global parameters are outside this POC scope.');
+            resource.dependsOn = [...dependencies];
+          }
+          fs.mkdirSync('build/dev', { recursive: true });
+          write('build/dev/template.json', {
+            $schema: 'https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#',
+            contentVersion: '1.0.0.0', parameters: template.parameters,
+            variables: template.variables, resources: template.resources
+          });
+          const parameters = read('build/export/ARMTemplateParametersForFactory.json');
+          parameters.parameters.factoryName = { value: DEV_FACTORY };
+          write('build/dev/parameters.json', parameters);
+          write('build/dev/desired.json', {
+            schemaVersion: 1,
+            factoryId: `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.DataFactory/factories/${DEV_FACTORY}`,
+            resources: desired.sort(),
+            requiredRuntimes: [...requiredRuntimes],
+            requiredLinkedServices: [...requiredLinkedServices]
+          });
+          console.log('Dev resources:', desired);
+          NODE
+
+      - name: Sign in to Azure without a client secret
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Only inventory-managed artifacts can be deleted. Never use ARM Complete mode.
+      # If the runner is killed, confirm ARM has stopped before manually breaking the inventory blob lease.
+      - name: Check Dev resources and record deployment ownership
+        id: dev
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/dev-state.mjs" <<'NODE'
+          import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const env = process.env;
+          const phase = process.argv[2];
+          if (env.GITHUB_REF !== 'refs/heads/dev') throw new Error('Dev branch only.');
+          const az = args => {
+            const text = execFileSync('az', [...args, '--only-show-errors', '-o', 'json'],
+              { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+            return text.trim() ? JSON.parse(text) : null;
+          };
+          const read = path => JSON.parse(fs.readFileSync(path, 'utf8'));
+          const desired = read('build/dev/desired.json');
+          const template = read('build/dev/template.json');
+          const id = desired.factoryId;
+          const expected = `/subscriptions/${env.SUBSCRIPTION}/resourceGroups/${env.RESOURCE_GROUP}/providers/Microsoft.DataFactory/factories/${env.DEV_FACTORY}`;
+          if (id !== expected) throw new Error('Unexpected target factory.');
+          az(['account', 'set', '--subscription', env.SUBSCRIPTION]);
+          const rest = (method, path, body) => az(['rest', '--method', method,
+            '--url', `https://management.azure.com${id}/${path}?api-version=2018-06-01`,
+            ...(body ? ['--body', JSON.stringify(body)] : [])]);
+          const list = kind => {
+            let page = rest('get', kind);
+            const items = [...page.value];
+            while (page.nextLink) {
+              if (!page.nextLink.startsWith(`https://management.azure.com${id}/`)) throw new Error('Unexpected pagination URL.');
+              page = az(['rest', '--method', 'get', '--url', page.nextLink]);
+              items.push(...page.value);
+            }
+            return items;
+          };
+          const refs = value => {
+            if (!value || typeof value !== 'object') return [];
+            const own = value.type === 'DatasetReference' ? [`datasets/${value.referenceName}`]
+              : value.type === 'PipelineReference' ? [`pipelines/${value.referenceName}`]
+              : value.type === 'LinkedServiceReference' ? [`linkedservices/${value.referenceName}`] : [];
+            return [...own, ...Object.values(value).flatMap(refs)];
+          };
+          const storage = ['--account-name', env.STORAGE_ACCOUNT, '--container-name', env.STATE_CONTAINER, '--auth-mode', 'login'];
+          const blob = [...storage, '--name', env.STATE_BLOB];
+          const leaseBlob = [...storage, '--blob-name', env.STATE_BLOB];
+          const leaseFile = 'build/dev/lease.json';
+          if (phase === 'release') {
+            if (fs.existsSync(leaseFile)) {
+              az(['storage', 'blob', 'lease', 'release', ...leaseBlob, '--lease-id', read(leaseFile)]);
+              fs.unlinkSync(leaseFile);
+            }
+            process.exit(0);
+          }
+          const save = (data, lease) => {
+            fs.writeFileSync('build/dev/inventory.json', JSON.stringify(data, null, 2));
+            az(['storage', 'blob', 'upload', ...blob, '--file', 'build/dev/inventory.json',
+              '--overwrite', lease ? 'true' : 'false', ...(lease ? ['--lease-id', lease] : ['--if-none-match', '*'])]);
+          };
+          for (const name of desired.requiredRuntimes)
+            rest('get', `integrationruntimes/${encodeURIComponent(name)}`);
+          for (const name of desired.requiredLinkedServices) {
+            const service = rest('get', `linkedservices/${encodeURIComponent(name)}`);
+            const runtime = service.properties.connectVia?.referenceName;
+            if (runtime) rest('get', `integrationruntimes/${encodeURIComponent(runtime)}`);
+          }
+          if (phase === 'prepare' && !az(['storage', 'blob', 'exists', ...blob]).exists)
+            save({ ...desired, resources: [] });
+          const lease = phase === 'prepare'
+            ? az(['storage', 'blob', 'lease', 'acquire', ...leaseBlob, '--lease-duration', '-1'])
+            : read(leaseFile);
+          if (typeof lease !== 'string' || !lease) throw new Error('Missing inventory lease.');
+          fs.writeFileSync(leaseFile, JSON.stringify(lease));
+            az(['storage', 'blob', 'download', ...blob, '--file', 'build/dev/previous.json', '--overwrite', 'true', '--lease-id', lease]);
+            const previous = read('build/dev/previous.json');
+            if (previous.schemaVersion !== 1 || previous.factoryId !== id || !Array.isArray(previous.resources) ||
+                previous.resources.some(key => !/^(pipelines|datasets)\/[A-Za-z0-9_][A-Za-z0-9_. -]*$/.test(key)) ||
+                new Set(previous.resources).size !== previous.resources.length) throw new Error('Invalid ownership inventory.');
+            const live = new Map();
+            const reload = () => {
+              live.clear();
+              for (const kind of ['pipelines', 'datasets'])
+                for (const item of list(kind)) live.set(`${kind}/${item.name}`, item);
+            };
+            reload();
+            for (const key of desired.resources)
+              if (live.has(key) && !previous.resources.includes(key)) throw new Error(`Unmanaged Dev item already exists: ${key}. Explicit ownership transfer is required.`);
+            const removed = previous.resources.filter(key => !desired.resources.includes(key));
+            const targets = new Map(template.resources.map(resource => [
+              `${resource.type.split('/').at(-1).toLowerCase()}/${resource.name.split('/').at(-1)}`, resource.properties
+            ]));
+            const checkReferences = useTargets => {
+              for (const [key, item] of live) {
+                if (removed.includes(key)) continue;
+                if (refs((useTargets && targets.get(key)) || item.properties).some(ref => removed.includes(ref)))
+                  throw new Error(`${key} still references an item scheduled for deletion.`);
+              }
+              for (const trigger of list('triggers')) {
+                const references = refs(trigger.properties);
+                if (references.some(key => removed.includes(key)) ||
+                    (trigger.properties.runtimeState === 'Started' && references.some(key => desired.resources.includes(key))))
+                  throw new Error(`Stop or update trigger ${trigger.name} before deployment.`);
+              }
+            };
+            checkReferences(true);
+            const active = rest('post', 'queryPipelineRuns', {
+              lastUpdatedAfter: '2000-01-01T00:00:00Z', lastUpdatedBefore: new Date().toISOString(),
+              filters: [{ operand: 'Status', operator: 'In', values: ['Queued', 'InProgress', 'Canceling'] }]
+            });
+            if (active.value.length || active.continuationToken) throw new Error('Dev must be idle for deployment.');
+            const order = [], pending = new Set(removed);
+            while (pending.size) {
+              const next = [...pending].find(key => ![...pending].some(other =>
+                other !== key && refs(live.get(other)?.properties).includes(key)));
+              if (!next) throw new Error('Deletion dependency cycle.');
+              order.push(next); pending.delete(next);
+            }
+            if (phase === 'prepare') {
+              // Journal ownership before ARM writes so a partial failure can be retried.
+              save({ ...desired, resources: [...new Set([...previous.resources, ...desired.resources])],
+                status: 'pending', commit: env.GITHUB_SHA }, lease);
+              fs.appendFileSync(env.GITHUB_OUTPUT, `has-resources=${template.resources.length > 0}\n`);
+              process.exit(0);
+            }
+            reload();
+            for (const key of desired.resources) {
+              const item = live.get(key);
+              if (!item) throw new Error(`Dev item missing after deployment: ${key}`);
+              if (key.startsWith('datasets/') &&
+                  item.properties.linkedServiceName?.referenceName !== targets.get(key).linkedServiceName?.referenceName)
+                throw new Error(`Wrong Dev linked service: ${key}`);
+            }
+            checkReferences(false);
+            for (const key of order) {
+              if (!live.has(key)) continue;
+              const [kind, name] = key.split('/');
+              console.log(`Deleting previously managed Dev item: ${key}`);
+              rest('delete', `${kind}/${encodeURIComponent(name)}`);
+            }
+            save({ ...desired, status: 'complete', commit: env.GITHUB_SHA }, lease);
+            console.log('Dev pipeline/dataset deployment complete. Factory, linked services and IRs unchanged; QA untouched.');
+          NODE
+          node "$RUNNER_TEMP/dev-state.mjs" prepare
+
+      - name: Validate Dev ARM template
+        if: steps.dev.outputs.has-resources == 'true'
+        uses: azure/bicep-deploy@v2
+        with:
+          type: deployment
+          operation: validate
+          scope: resourceGroup
+          subscription-id: ${{ env.SUBSCRIPTION }}
+          resource-group-name: ${{ env.RESOURCE_GROUP }}
+          template-file: build/dev/template.json
+          parameters-file: build/dev/parameters.json
+
+      - name: Deploy Dev ARM template
+        if: success() && steps.dev.outputs.has-resources == 'true'
+        uses: azure/bicep-deploy@v2
+        with:
+          type: deployment
+          operation: create
+          scope: resourceGroup
+          name: adf-dev-${{ github.run_id }}-${{ github.run_attempt }}
+          subscription-id: ${{ env.SUBSCRIPTION }}
+          resource-group-name: ${{ env.RESOURCE_GROUP }}
+          template-file: build/dev/template.json
+          parameters-file: build/dev/parameters.json
+
+      - name: Verify Dev and synchronize tracked deletions
+        run: node "$RUNNER_TEMP/dev-state.mjs" finalize
+
+      - name: Release inventory lock even after failure
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "build/dev/lease.json" ]; then
+            node "$RUNNER_TEMP/dev-state.mjs" release
+          fi
