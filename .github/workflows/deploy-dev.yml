@@ -33,8 +33,7 @@ jobs:
         run: bash scripts/export-adf.sh
 
   deploy:
-    # Remove "false &&" only after the fresh deployment prerequisites are approved.
-    if: false && github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/qa')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/qa')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:

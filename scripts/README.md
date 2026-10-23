@@ -11,10 +11,12 @@ permission, no Azure login and no deployment. When ADF source JSON exists,
 export requires network access to npm and Microsoft's public ADF utility bundle,
 but no Azure deployment credentials.
 
-Azure deployment is unconditionally paused by `false &&` in the deployment
-job's condition. Repository variables cannot bypass this pause. Remove the prefix
-only in a reviewed change after the new prerequisites are ready and approved;
-the remaining condition then permits only pushes to `dev`/`qa`.
+Deployment enablement was explicitly approved after the OIDC identity and
+scoped Azure permissions were configured. The deployment job permits only
+pushes to `dev`/`qa`; feature pushes and PRs cannot enter it. Merge the reviewed
+enablement change to `dev` to trigger a new deployment run. A deployment job
+skipped on a PR is expected, and re-running an old skipped push run still uses
+that run's original workflow revision.
 An absent source root or a source root with no JSON files is an explicit,
 successful bootstrap no-op. `export-adf.sh` writes `has-source=false` to
 `GITHUB_OUTPUT` when available, skips npm/export/preparation and never reads
@@ -23,8 +25,9 @@ for that case. A source path that exists but is not a directory fails explicitly
 
 With source present, the deployment job uses OIDC repository variables
 `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` and per-environment
-concurrency. Recreate and verify the deployment identity and permissions before
-enabling it. `export-adf.sh` writes `has-source=true` only after export and
+concurrency. The first enabled push run must verify Azure login and ARM access;
+configuration alone is not proof of working authentication.
+`export-adf.sh` writes `has-source=true` only after export and
 preparation succeed. It uses
 ADF Utilities **1.0.3** with the required **relative** `build/export` output.
 `prepare-adf.mjs` preserves generated parameters/variables/functions, rebuilds
