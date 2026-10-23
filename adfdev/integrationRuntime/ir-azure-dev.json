@@ -1,0 +1,17 @@
+{
+  "name": "ir-azure-dev",
+  "properties": {
+    "type": "Managed",
+    "typeProperties": {
+      "computeProperties": {
+        "dataFlowProperties": {
+          "cleanup": true,
+          "computeType": "General",
+          "coreCount": 8,
+          "timeToLive": 0
+        },
+        "location": "centralindia"
+      }
+    }
+  }
+}

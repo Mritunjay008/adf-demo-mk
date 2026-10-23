@@ -2,21 +2,16 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const prefix = 'Microsoft.DataFactory/factories';
-const deployableLinkedServices = new Set(['ls_kv_dev', 'ls_sql_source_dev', 'ls_sql_destination_dev']);
-const deployableKinds = new Set(['pipelines', 'datasets', 'linkedServices']);
+const deployableKinds = new Set(['pipelines', 'datasets']);
 export const artifactTypes = [...deployableKinds].map(kind => `${prefix}/${kind}`);
-export const sqlRuntimeSecrets = {
+export const sqlConnectionSecrets = {
   dev: {
-    sourceUser: 'adf_dev_reader',
-    sourceSecret: 'sql-dev-source-password',
-    destinationUser: 'adf_dev_writer',
-    destinationSecret: 'sql-dev-destination-password',
+    source: 'sql-dev-source-connection-string',
+    destination: 'sql-dev-destination-connection-string',
   },
   qa: {
-    sourceUser: 'adf_qa_reader',
-    sourceSecret: 'sql-qa-source-password',
-    destinationUser: 'adf_qa_writer',
-    destinationSecret: 'sql-qa-destination-password',
+    source: 'sql-qa-source-connection-string',
+    destination: 'sql-qa-destination-connection-string',
   },
 };
 
@@ -64,15 +59,7 @@ export function prepareArtifacts(sourceTemplate, sourceParameters, target) {
   const scopedResources = [];
   for (const resource of template.resources) {
     if (resource.resources?.length) throw new Error('Nested ARM resources are outside this POC scope.');
-    if (resource.type === prefix || resource.type === `${prefix}/integrationRuntimes`) continue;
-    if (resource.type === `${prefix}/linkedServices`) {
-      const name = parseExportName(resource.name);
-      if (name === 'ls_adls_dev') continue;
-      if (!deployableLinkedServices.has(name))
-        throw new Error(`Outside linked-service scope: ${name}`);
-      scopedResources.push({ ...resource, __sourceName: name });
-      continue;
-    }
+    if ([prefix, `${prefix}/integrationRuntimes`, `${prefix}/linkedServices`].includes(resource.type)) continue;
     if (!artifactTypes.includes(resource.type)) throw new Error(`Outside POC scope: ${resource.type}`);
     scopedResources.push({ ...resource, __sourceName: parseExportName(resource.name) });
   }
@@ -84,11 +71,7 @@ export function prepareArtifacts(sourceTemplate, sourceParameters, target) {
     const key = `${kind}/${resource.__sourceName}`;
     if (ids.has(key)) throw new Error(`Duplicate artifact: ${key}`);
     ids.add(key);
-    const targetName = kind === 'linkedServices'
-      ? target.linkedServiceMap[resource.__sourceName]
-      : resource.__sourceName;
-    if (!targetName) throw new Error(`Missing target name mapping: ${resource.__sourceName}`);
-    resource.name = `${target.factory}/${targetName}`;
+    resource.name = `${target.factory}/${resource.__sourceName}`;
   }
   for (const resource of template.resources) {
     const dependencies = new Set();
@@ -101,8 +84,6 @@ export function prepareArtifacts(sourceTemplate, sourceParameters, target) {
         const mappedName = target.linkedServiceMap[sourceName];
         if (!mappedName) throw new Error(`Unsupported linked service mapping: ${sourceName}`);
         node.referenceName = mappedName;
-        if (ids.has(`linkedServices/${sourceName}`))
-          dependencies.add(`[resourceId('${prefix}/linkedServices', '${target.factory}', '${mappedName}')]`);
       } else if (node.type === 'IntegrationRuntimeReference') {
         if (node.referenceName !== 'ir-azure-dev')
           throw new Error(`Add a runtime mapping for: ${node.referenceName}`);
@@ -125,24 +106,6 @@ export function prepareArtifacts(sourceTemplate, sourceParameters, target) {
       if (resource.properties?.type !== 'AzureSqlTable')
         throw new Error('Unexpected QA SQL sink dataset type.');
       resource.properties.typeProperties.schema = 'qa';
-    }
-    if (target.branch === 'qa' && resource.type.endsWith('/linkedServices') &&
-        resource.name.endsWith('/ls_sql_source_qa')) {
-      const sql = resource.properties?.typeProperties;
-      if (resource.properties?.type !== 'AzureSqlDatabase' || typeof sql?.connectionString !== 'string')
-        throw new Error('Unexpected QA SQL source linked service shape.');
-      sql.connectionString = sql.connectionString.replace(/(\buser\s*id\s*=\s*)adf_dev_reader\b/i,
-        `$1${sqlRuntimeSecrets.qa.sourceUser}`);
-      sql.password.secretName = sqlRuntimeSecrets.qa.sourceSecret;
-    }
-    if (target.branch === 'qa' && resource.type.endsWith('/linkedServices') &&
-        resource.name.endsWith('/ls_sql_destination_qa')) {
-      const sql = resource.properties?.typeProperties;
-      if (resource.properties?.type !== 'AzureSqlDatabase' || typeof sql?.connectionString !== 'string')
-        throw new Error('Unexpected QA SQL destination linked service shape.');
-      sql.connectionString = sql.connectionString.replace(/(\buser\s*id\s*=\s*)adf_dev_writer\b/i,
-        `$1${sqlRuntimeSecrets.qa.destinationUser}`);
-      sql.password.secretName = sqlRuntimeSecrets.qa.destinationSecret;
     }
     if (JSON.stringify(resource.properties).includes('pipeline().globalParameters'))
       throw new Error('Factory global parameters are outside this POC scope.');
