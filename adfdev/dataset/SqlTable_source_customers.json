@@ -1,0 +1,29 @@
+{
+  "name": "SqlTable_source_customers",
+  "properties": {
+    "linkedServiceName": {
+      "referenceName": "ls_sql_source_dev",
+      "type": "LinkedServiceReference"
+    },
+    "annotations": [],
+    "type": "AzureSqlTable",
+    "schema": [
+      {
+        "name": "CustomerId",
+        "type": "int"
+      },
+      {
+        "name": "FullName",
+        "type": "nvarchar"
+      },
+      {
+        "name": "Email",
+        "type": "nvarchar"
+      }
+    ],
+    "typeProperties": {
+      "schema": "dbo",
+      "table": "Customers"
+    }
+  }
+}

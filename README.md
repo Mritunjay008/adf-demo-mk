@@ -7,8 +7,15 @@ Azure Data Factory artifact CI/CD, reset for a fresh start on 22 October 2026.
 The previous ADF definitions have been removed. The source root `/adfdev` now
 contains the current Dev factory, managed IR and three linked-service definitions
 as safe Git authoring/export context. They contain Key Vault references, not
-secret values. Datasets and pipelines will be created in ADF Studio on the
-feature branch after this context is committed and pushed.
+secret values. The source also contains the two SQL datasets and a single
+insert-only Copy Customers pipeline, authored through the normal Git workflow.
+
+ADF Studio can read the feature branch, but its **Save all** GitHub commit
+authorization currently fails even after reconnecting. That issue is not fixed
+by Git-file authoring. Until it is resolved, save definition changes in the
+repository using the already-authorized Git client rather than repeatedly
+reconnecting or weakening repository protections. Back up unsaved ADF drafts
+before refreshing to load pushed definitions.
 
 Infrastructure is managed in the separate Terraform workspace. The basic
 Terraform configuration contains these resources in Central India:
@@ -104,7 +111,7 @@ if needed; that branch is not used by the workflow.
 
 - [Workflow](.github/workflows/deploy-dev.yml): PR validation and gated deployment.
 - [Scripts](scripts/README.md): export, template preparation, checks and tests.
-- [adfdev](adfdev): Dev factory, IR and linked-service authoring context.
+- [adfdev](adfdev): datasets/pipeline plus Terraform-owned authoring context.
 - `build`: ignored, generated deployment files and export tooling.
 
 SQL setup is manual and outside this repository's automation. No database setup
@@ -114,17 +121,32 @@ new design before enabling deployment. Complete definitions remain export
 context when saved to Git, but factory, IR and all linked-service resources
 are excluded from the final ARM deployment.
 
+## SQL copy flow
+
+| Definition | Purpose |
+| --- | --- |
+| [SqlTable_source_customers](adfdev/dataset/SqlTable_source_customers.json) | Reads `dbo.Customers` through `ls_sql_source_dev` |
+| [SqlTable_destination_customers](adfdev/dataset/SqlTable_destination_customers.json) | Writes `dev.Customers` through `ls_sql_destination_dev` |
+| [pl_sql_copy_customers](adfdev/pipeline/pl_sql_copy_customers.json) | Copies `CustomerId`, `FullName` and `Email` with explicit mappings |
+
+QA preparation maps the linked services to their `_qa` counterparts and the
+destination schema to `qa`. Each target ARM template contains only these two
+datasets and this pipeline; the factory, IR and linked services remain excluded.
+
+The copy is insert-only, has no automatic retries, and uses existing tables.
+It does not truncate, delete, recreate or upsert data. Do not run it repeatedly
+against the same primary keys; duplicates will fail. Pipeline execution and
+the initial empty-destination check need separate approval.
+
 ## Next steps
 
-1. Commit and push the validated Dev authoring context and CI changes to the
-   feature branch, then select that same branch and refresh ADF Studio.
-   Terraform still owns the factory, IR and linked services; artifact CI/CD
-   excludes them. Refresh these snapshots when Terraform changes their settings.
+1. Review the Git-authored datasets and pipeline on the feature branch. After
+   the push is verified, select that branch and refresh ADF Studio to load them;
+   retain backups before discarding unsaved local drafts. Do not Publish or Debug.
+2. Terraform still owns the factory, IR and linked services; artifact CI/CD
+   excludes them. Refresh context snapshots when Terraform changes their settings.
    Never put secret values in Git, chat, Terraform inputs or state.
-2. Build a minimal SQL copy pipeline and datasets on the working feature branch.
-   Align deployment mappings and preflight checks with the new design; Terraform
-   and ADF CI/CD must not both manage the same linked services.
-3. When ready to deploy, recreate the deployment identity, Dev/QA OIDC trust,
+3. Recreate the deployment identity, Dev/QA OIDC trust,
    Azure permissions and GitHub repository variables.
 4. Validate a non-empty export, then remove the deployment pause in a reviewed PR.
 5. Promote the completed feature work to Dev, test it, then promote to QA.

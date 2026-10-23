@@ -48,6 +48,12 @@ three Dev Key Vault/SQL linked services. They must be pushed to the selected
 feature branch before those services appear in ADF Studio Git mode. Refresh
 the snapshots when their Terraform-managed settings change; do not edit their
 connection settings independently in Git or deploy them through artifact CI/CD.
+The current deployable source consists of `SqlTable_source_customers`,
+`SqlTable_destination_customers` and `pl_sql_copy_customers`. The Copy activity
+uses explicit three-column mappings, insert-only writes and no automatic retries;
+no pre-copy cleanup or table creation is configured.
+ADF Studio Save all authorization is unresolved; the approved authoring route
+is normal Git commits/pushes on the feature branch, not Studio Publish.
 QA maps `ls_adls_dev` to `ls_adls_qa`, `ls_kv_dev` to `ls_kv_qa`,
 `ls_sql_source_dev` to `ls_sql_source_qa`, `ls_sql_destination_dev` to
 `ls_sql_destination_qa`, `ir-azure-dev` references to `ir-azure-qa`,

@@ -1,0 +1,74 @@
+{
+  "name": "pl_sql_copy_customers",
+  "properties": {
+    "activities": [
+      {
+        "name": "copy_customers_sql",
+        "type": "Copy",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.00:10:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "userProperties": [],
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": "SELECT CustomerId, FullName, Email FROM dbo.Customers"
+          },
+          "sink": {
+            "type": "AzureSqlSink",
+            "writeBehavior": "insert",
+            "sqlWriterUseTableLock": false
+          },
+          "enableStaging": false,
+          "translator": {
+            "type": "TabularTranslator",
+            "mappings": [
+              {
+                "source": {
+                  "name": "CustomerId"
+                },
+                "sink": {
+                  "name": "CustomerId"
+                }
+              },
+              {
+                "source": {
+                  "name": "FullName"
+                },
+                "sink": {
+                  "name": "FullName"
+                }
+              },
+              {
+                "source": {
+                  "name": "Email"
+                },
+                "sink": {
+                  "name": "Email"
+                }
+              }
+            ]
+          }
+        },
+        "inputs": [
+          {
+            "referenceName": "SqlTable_source_customers",
+            "type": "DatasetReference"
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "SqlTable_destination_customers",
+            "type": "DatasetReference"
+          }
+        ]
+      }
+    ],
+    "annotations": []
+  }
+}
