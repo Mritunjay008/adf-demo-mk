@@ -1,0 +1,14 @@
+{
+  "name": "ls_kv_dev",
+  "properties": {
+    "connectVia": {
+      "referenceName": "ir-azure-dev",
+      "type": "IntegrationRuntimeReference"
+    },
+    "annotations": [],
+    "type": "AzureKeyVault",
+    "typeProperties": {
+      "baseUrl": "https://kv-adfpocmk-4d070b73.vault.azure.net/"
+    }
+  }
+}

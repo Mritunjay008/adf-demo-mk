@@ -1,15 +1,10 @@
 {
-	"name": "adf-poc-dev-mk-001",
-	"properties": {
-		"trustModeClaimForMi": {
-			"value": "Enabled",
-			"editable": true
-		}
-	},
-	"location": "centralindia",
-	"identity": {
-		"type": "SystemAssigned",
-		"principalId": "9286be3b-23c8-4d66-b7a1-b8a4a262a1be",
-		"tenantId": "335a6d75-c3eb-4b1a-ac08-d49338816ca0"
-	}
+  "name": "adf-poc-dev-mk-001",
+  "properties": {},
+  "location": "centralindia",
+  "identity": {
+    "type": "SystemAssigned",
+    "principalId": "7c785988-7aec-46f1-8c1b-0081716e0ff7",
+    "tenantId": "335a6d75-c3eb-4b1a-ac08-d49338816ca0"
+  }
 }
