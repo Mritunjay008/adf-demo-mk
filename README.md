@@ -40,7 +40,39 @@ The SQL server `sql-adf-poc-mk-4d070b73` and databases
 `sqldb-adf-poc-source` / `sqldb-adf-poc-destination` are managed manually,
 not by this Terraform workspace. Each complete SQL connection string is stored
 manually in Key Vault and referenced by name. Terraform owns all linked services;
-ADF artifact CI/CD owns datasets and pipelines only. OIDC setup is still pending.
+ADF artifact CI/CD owns datasets and pipelines only.
+
+## Deployment identity
+
+The user registered the single-tenant application `github-adf-demo-mk-deploy`
+with client ID `08de3f0d-06fd-410a-be0e-94f536ee5778`. Its service principal
+object ID is `5097cd47-6666-4c26-895d-8ec36252f19f`. The two verified federated
+credentials trust only this repository's immutable Dev/QA branch subjects:
+
+```text
+repo:Mritunjay008@121124935/adf-demo-mk@1428039930:ref:refs/heads/dev
+repo:Mritunjay008@121124935/adf-demo-mk@1428039930:ref:refs/heads/qa
+```
+
+The issuer is `https://token.actions.githubusercontent.com` and the audience is
+`api://AzureADTokenExchange`. No client secret is required. The user configured
+Actions repository variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
+`AZURE_SUBSCRIPTION_ID`; the CLI account cannot independently read those settings.
+
+Terraform manages one custom role and its assignment to this principal at
+`rg-adf-poc` scope. Its explicit action list permits ARM deployment
+validation/creation, dataset/pipeline create/update, and reads of factory,
+linked-service and IR metadata. It has no resource-delete, SQL, Key Vault data,
+factory/IR/linked-service write, role-management or pipeline-execution actions.
+The application and federated credentials are managed separately, not by this
+Terraform workspace.
+
+The reviewed enablement change allows deployments only on pushes to `dev` or
+`qa`; it must be merged into the target branch to take effect there.
+Azure OIDC login and deployment still require verification through the first
+GitHub Actions run before this setup is considered working.
+
+## Data connections
 
 Terraform creates a Standard, RBAC-enabled Key Vault and grants its current
 Azure user the vault-scoped Key Vault Secrets Officer role for manual secret
@@ -82,25 +114,26 @@ soft-delete retention and no purge protection. Terraform will not automatically
 purge or recover deleted vaults. Review network restrictions and purge protection
 before using this resettable POC design for production.
 
-## Bootstrap safety
+## Deployment gates
 
-Azure deployment is unconditionally paused by the `false &&` condition on the
-workflow's deployment job. Repository variables cannot override this pause.
-Remove that prefix only in a reviewed change after the new deployment
-prerequisites are ready and approved.
+The bootstrap pause has been removed with explicit user approval after the
+deployment app, federated credentials, reported repository variables and scoped
+Azure role were configured. Only pushes to `dev` and `qa` can deploy. A feature
+push or a pull request cannot enter the deployment job.
 
 Pull requests into `dev` still run tests and source validation without Azure
 login. If `/adfdev` is absent or contains no JSON files, export reports a
 bootstrap no-op: it does not install export tools, generate ARM templates or
-consume old build output. Even when deployment is enabled, an empty source
-skips Azure login and deployment.
+consume old build output. An empty source skips Azure login and deployment.
+With source present, failed login, external-resource checks or ARM validation
+stop the job before creation. Deployment creates/updates definitions only;
+it never runs the data-copy pipeline.
 
 ## Branching
 
 1. Make changes on `feature/*`; never commit or push directly to `dev`.
 2. Open a reviewed PR into `dev`, the default and ADF collaboration branch.
-3. After bootstrap is complete and the deployment pause is removed, merging into `dev`
-   deploys Dev.
+3. Merging the reviewed enablement/content PR into `dev` triggers Dev deployment.
 4. Promote `dev` to `qa` through a PR to deploy QA.
 
 Enforce PR-only changes with GitHub branch protection/rulesets. Do not use
@@ -117,7 +150,7 @@ if needed; that branch is not used by the workflow.
 SQL setup is manual and outside this repository's automation. No database setup
 scripts are included. The retained preparation/checking code still contains
 the previous bounded SQL/ADLS mappings; review those assumptions against the
-new design before enabling deployment. Complete definitions remain export
+new design before promotion. Complete definitions remain export
 context when saved to Git, but factory, IR and all linked-service resources
 are excluded from the final ARM deployment.
 
@@ -146,11 +179,14 @@ the initial empty-destination check need separate approval.
 2. Terraform still owns the factory, IR and linked services; artifact CI/CD
    excludes them. Refresh context snapshots when Terraform changes their settings.
    Never put secret values in Git, chat, Terraform inputs or state.
-3. Recreate the deployment identity, Dev/QA OIDC trust,
-   Azure permissions and GitHub repository variables.
-4. Validate a non-empty export, then remove the deployment pause in a reviewed PR.
-5. Promote the completed feature work to Dev, test it, then promote to QA.
-   Pipeline execution needs separate approval.
+3. Open a reviewed PR from the feature branch into `dev` for deployment
+   enablement. PR validation is read-only; its deployment job should be skipped.
+4. Merge after validation passes, then verify the new Dev push run completes
+   Azure login, ARM validation, creation and artifact verification. Re-running
+   an older skipped run does not use the updated workflow.
+5. Only after successful Dev deployment, obtain approval for one data-copy test
+   and verify destination rows. Promote `dev` into `qa` afterward and verify
+   that environment separately. Do not run insert-only copying repeatedly.
 
 ## Local validation
 

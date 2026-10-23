@@ -446,7 +446,7 @@ test('target mismatch, CLI failures and post-deployment mapping failures fail cl
     mockAzure('qa', template, options).execute), error);
 });
 
-test('workflow pauses deployment while isolating PR validation from push-only OIDC', () => {
+test('workflow enables only Dev/QA push deployment while keeping PR validation read-only', () => {
   const workflow = read('.github/workflows/deploy-dev.yml');
   assert.match(workflow, /pull_request:\s+branches: \[dev\]/);
   assert.match(workflow, /push:\s+branches: \[dev, qa\]/);
@@ -455,7 +455,8 @@ test('workflow pauses deployment while isolating PR validation from push-only OI
   const [validation, deployment] = jobs.split('\n  deploy:\n');
   assert.match(validation, /if: github.event_name == 'pull_request' && github.base_ref == 'dev'/);
   assert.doesNotMatch(validation, /azure\/|id-token|check-adf|secrets\.|persist-credentials:\s*true/);
-  assert.match(deployment, /if: false && github.event_name == 'push' && \(github.ref == 'refs\/heads\/dev' \|\| github.ref == 'refs\/heads\/qa'\)/);
+  assert.match(deployment, /^    if: github.event_name == 'push' && \(github.ref == 'refs\/heads\/dev' \|\| github.ref == 'refs\/heads\/qa'\)$/m);
+  assert.doesNotMatch(deployment, /if:\s*false\s*&&/);
   assert.match(deployment, /id-token: write/);
   assert.match(deployment, /group: adf-\$\{\{ github.ref_name \}\}-deployment/);
   assert.equal((deployment.match(/uses: azure\/bicep-deploy@v2/g) || []).length, 2);
