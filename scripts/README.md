@@ -39,25 +39,48 @@ that can select Complete mode. Verified on 22 October 2026 against `v2` at
 The existing `@v2` tag is retained; recheck this contract when upgrading it.
 Azure CLI/action failures fail the job; no pipeline is executed.
 
-The retained preparation code supports datasets, pipelines and approved linked services. Factory and
-integration runtime definitions are excluded. External ADLS linked services and
-IRs must already exist. The approved linked-service scope is:
-`ls_kv_dev`, `ls_sql_source_dev`, `ls_sql_destination_dev` (mapped per target).
+The preparation code deploys datasets and pipelines only. Factory, integration
+runtime and all linked-service definitions are excluded from the final ARM
+template; Terraform owns these resources. Complete definitions can remain in
+Git as export/authoring context without becoming deployment targets.
+The current `adfdev` snapshots include the Dev factory, `ir-azure-dev` and the
+three Dev Key Vault/SQL linked services. They must be pushed to the selected
+feature branch before those services appear in ADF Studio Git mode. Refresh
+the snapshots when their Terraform-managed settings change; do not edit their
+connection settings independently in Git or deploy them through artifact CI/CD.
+The current deployable source consists of `SqlTable_source_customers`,
+`SqlTable_destination_customers` and `pl_sql_copy_customers`. The Copy activity
+uses explicit three-column mappings, insert-only writes and no automatic retries;
+no pre-copy cleanup or table creation is configured.
+ADF Studio Save all authorization is unresolved; the approved authoring route
+is normal Git commits/pushes on the feature branch, not Studio Publish.
 QA maps `ls_adls_dev` to `ls_adls_qa`, `ls_kv_dev` to `ls_kv_qa`,
 `ls_sql_source_dev` to `ls_sql_source_qa`, `ls_sql_destination_dev` to
 `ls_sql_destination_qa`, `ir-azure-dev` references to `ir-azure-qa`,
-`DelimitedText_sink` to `sink/qa/output`, SQL sink schema `dev` to `qa`,
-and SQL secret/user references to QA values. Unsupported resource types,
+`DelimitedText_sink` to `sink/qa/output` and SQL sink schema `dev` to `qa`.
+Complete connection-string secret references are configured per environment in
+Terraform, not rewritten in the artifact template. The operator supplies each
+secret's server, database and credentials privately in Key Vault. Unsupported resource types,
 dynamic artifact references and missing Git references fail explicitly.
 
-These mappings are compatibility behavior, not fresh resource definitions.
-Review them against the new artifacts before enabling deployment. The current
-preflight also expects referenced linked services to exist already in the target;
-resolve that bootstrap requirement before the first non-empty deployment.
+Preflight expects all referenced linked services and IRs to exist in the target.
+It reads the external SQL linked services, validates runtime and the complete
+connection-string secret references, and follows their Key Vault references to
+validate those linked services too. SQL services must use an AzureKeyVaultSecret
+connectionString with the expected environment/role secret and vault reference,
+without a separate password property. Inline or redacted connection strings and
+legacy split-password configuration are rejected in this mode.
+The hidden secret contents, including server/database/username/password, are
+not inspected by preflight; connection tests are required to validate them.
+It uses only ARM GET requests; it does not read secret values, authenticate to
+SQL, test firewall connectivity or prove SQL permissions.
+Review compatibility mappings against new artifacts before enabling deployment.
 
 SQL databases, schemas, tables, runtime users and permissions are prepared
-manually by the user, outside ADF CI/CD. Matching runtime passwords must already
-be available in Key Vault. This repository's deployment automation consumes
+manually by the user, outside ADF CI/CD. Matching complete SQL connection strings
+must already be available in Key Vault. The temporary demo's administrator
+credentials are not least privilege, even with secret-scoped ADF access.
+This repository's deployment automation consumes
 those existing resources; it does not run database setup or populate secrets.
 
 Matching names update and new names create. Removing or renaming a Git artifact

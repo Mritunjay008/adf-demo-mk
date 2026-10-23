@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { artifactTypes, sqlRuntimeSecrets, targetForEvent, visit } from './prepare-adf.mjs';
+import { artifactTypes, sqlConnectionSecrets, targetForEvent, visit } from './prepare-adf.mjs';
 
 export function checkArtifacts(env, template, parameters, phase, execute = execFileSync) {
   const target = targetForEvent(env, true);
@@ -42,6 +42,21 @@ export function checkArtifacts(env, template, parameters, phase, execute = execF
           throw new Error(`${name} must use ${target.runtime}.`);
         runtimes.add(target.runtime);
       }
+      if (name.startsWith('ls_sql_')) {
+        const role = name === target.linkedServiceMap.ls_sql_source_dev ? 'source'
+          : name === target.linkedServiceMap.ls_sql_destination_dev ? 'destination' : null;
+        const sql = service.properties.typeProperties;
+        const connection = sql?.connectionString;
+        const secret = role && sqlConnectionSecrets[target.branch][role];
+        if (service.properties.type !== 'AzureSqlDatabase' || !secret ||
+            connection?.type !== 'AzureKeyVaultSecret' || connection.secretName !== secret ||
+            sql?.password != null)
+          throw new Error(`Wrong ${target.branch.toUpperCase()} SQL ${role || 'linked service'} connection-string reference.`);
+        const store = connection.store;
+        if (store?.type !== 'LinkedServiceReference' || store.referenceName !== target.linkedServiceMap.ls_kv_dev)
+          throw new Error(`Wrong target Key Vault reference: ${name}`);
+        linkedServices.add(store.referenceName);
+      }
       if (name.startsWith('ls_kv_') && service.properties.type !== 'AzureKeyVault')
         throw new Error(`${name} must be an AzureKeyVault linked service.`);
     }
@@ -56,21 +71,6 @@ export function checkArtifacts(env, template, parameters, phase, execute = execF
     const name = resource.name.slice(target.factory.length + 1);
     const item = get(`${kind}/${encodeURIComponent(name)}`);
     if (!item?.properties) throw new Error(`Target artifact missing after deployment: ${name}`);
-    if (kind === 'linkedServices' && item.properties.type !== resource.properties.type)
-      throw new Error(`Wrong target linked service type: ${name}`);
-    if (kind === 'linkedServices' && name.startsWith('ls_sql_') &&
-        item.properties.connectVia?.referenceName !== target.runtime)
-      throw new Error(`Wrong target runtime on linked service: ${name}`);
-    if (kind === 'linkedServices' && target.branch === 'qa' && name === 'ls_sql_source_qa') {
-      if (!item.properties.typeProperties?.connectionString?.match(/\buser\s*id\s*=\s*adf_qa_reader\b/i) ||
-          item.properties.typeProperties?.password?.secretName !== sqlRuntimeSecrets.qa.sourceSecret)
-        throw new Error('Wrong QA SQL source credentials mapping.');
-    }
-    if (kind === 'linkedServices' && target.branch === 'qa' && name === 'ls_sql_destination_qa') {
-      if (!item.properties.typeProperties?.connectionString?.match(/\buser\s*id\s*=\s*adf_qa_writer\b/i) ||
-          item.properties.typeProperties?.password?.secretName !== sqlRuntimeSecrets.qa.destinationSecret)
-        throw new Error('Wrong QA SQL destination credentials mapping.');
-    }
     if (kind === 'datasets' &&
         item.properties.linkedServiceName?.referenceName !== resource.properties.linkedServiceName?.referenceName)
       throw new Error(`Wrong target linked service: ${name}`);

@@ -4,13 +4,12 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { prepareArtifacts, sqlRuntimeSecrets, targetForEvent } from './prepare-adf.mjs';
+import { prepareArtifacts, sqlConnectionSecrets, targetForEvent } from './prepare-adf.mjs';
 import { checkArtifacts } from './check-adf.mjs';
 
 const root = new URL('../', import.meta.url);
 const read = path => fs.readFileSync(new URL(path, root), 'utf8').replaceAll('\r\n', '\n');
 const prefix = 'Microsoft.DataFactory/factories';
-const deployableSourceLinkedServices = new Set(['ls_kv_dev', 'ls_sql_source_dev', 'ls_sql_destination_dev']);
 const envFor = branch => ({
   GITHUB_EVENT_NAME: 'push', GITHUB_REF: `refs/heads/${branch}`,
   SUBSCRIPTION: 'test-subscription', RESOURCE_GROUP: 'test-group',
@@ -37,17 +36,13 @@ function exported() {
       typeProperties: { baseUrl: 'https://example.vault.azure.net/' },
     }),
   ];
-  for (const [role, user, secret] of [
-    ['source', 'adf_dev_reader', 'sql-dev-source-password'],
-    ['destination', 'adf_dev_writer', 'sql-dev-destination-password'],
-  ]) {
+  for (const role of ['source', 'destination']) {
     resources.push(artifact('linkedServices', `ls_sql_${role}_dev`, {
       type: 'AzureSqlDatabase',
       connectVia: reference('IntegrationRuntime', 'ir-azure-dev'),
       typeProperties: {
-        connectionString: `data source=example.database.windows.net;initial catalog=${role};user id=${user}`,
-        password: {
-          type: 'AzureKeyVaultSecret', secretName: secret,
+        connectionString: {
+          type: 'AzureKeyVaultSecret', secretName: sqlConnectionSecrets.dev[role],
           store: reference('LinkedService', 'ls_kv_dev'),
         },
       },
@@ -149,11 +144,45 @@ function mockAzure(branch, template, options = {}) {
     if (url.includes('/integrationruntimes/')) return '{}';
     if (url.includes('/linkedservices/')) {
       const linkedServiceName = decodeURIComponent(url.split('/').at(-1).split('?')[0]);
-      if (options.wrongRuntime && linkedServiceName.startsWith('ls_sql_'))
-        return JSON.stringify({ properties: { type: 'AzureSqlDatabase', connectVia: { referenceName: 'wrong' } } });
+      if (options.missingLinkedService) return '{}';
       if (linkedServiceName.startsWith('ls_kv_'))
         return JSON.stringify({ properties: { type: options.wrongKeyVaultType ? 'WrongType' : 'AzureKeyVault' } });
-      return JSON.stringify({ properties: { type: 'AzureSqlDatabase', connectVia: { referenceName: target.runtime } } });
+      const properties = {
+        type: linkedServiceName.startsWith('ls_adls_') ? 'AzureBlobFS' : 'AzureSqlDatabase',
+        connectVia: { referenceName: options.wrongRuntime ? 'wrong' : target.runtime },
+      };
+      if (linkedServiceName.startsWith('ls_sql_')) {
+        const role = linkedServiceName === target.linkedServiceMap.ls_sql_source_dev ? 'source' : 'destination';
+        properties.typeProperties = {
+          connectionString: {
+            type: 'AzureKeyVaultSecret', secretName: sqlConnectionSecrets[branch][role],
+            store: { type: 'LinkedServiceReference', referenceName: target.linkedServiceMap.ls_kv_dev },
+          },
+        };
+        if (options.wrongSqlType) properties.type = 'WrongType';
+        if ((options.wrongSourceSecret && role === 'source') ||
+            (options.wrongDestinationSecret && role === 'destination'))
+          properties.typeProperties.connectionString.secretName = 'wrong';
+        if (options.crossEnvironmentSecret)
+          properties.typeProperties.connectionString.secretName =
+            sqlConnectionSecrets[branch === 'dev' ? 'qa' : 'dev'][role];
+        if (options.wrongSecretType) properties.typeProperties.connectionString.type = 'SecureString';
+        if (options.wrongVaultReference)
+          properties.typeProperties.connectionString.store.referenceName = 'wrong';
+        if (options.redactedConnection)
+          properties.typeProperties.connectionString = { type: 'SecureString', value: '**********' };
+        if (options.missingConnection) delete properties.typeProperties.connectionString;
+        if (options.unsupportedConnection)
+          properties.typeProperties.connectionString = { type: 'WrongType', value: 'not-a-connection' };
+        if (options.inlineConnection)
+          properties.typeProperties.connectionString = 'data source=example.database.windows.net';
+        if (options.legacyPassword)
+          properties.typeProperties.password = {
+            type: 'AzureKeyVaultSecret', secretName: 'old-password',
+            store: { type: 'LinkedServiceReference', referenceName: target.linkedServiceMap.ls_kv_dev },
+          };
+      }
+      return JSON.stringify({ properties });
     }
     const key = url.split('?')[0].split('/').slice(-2).map(decodeURIComponent).join('/');
     if (options.missing) return '{}';
@@ -161,13 +190,6 @@ function mockAzure(branch, template, options = {}) {
     if (options.wrongService && key.startsWith('datasets/')) item.properties.linkedServiceName.referenceName = 'wrong';
     if (options.wrongPath && key === 'datasets/DelimitedText_sink') item.properties.typeProperties.location.folderPath = 'wrong';
     if (options.wrongSchema && key === 'datasets/SqlTable_destination_customers') item.properties.typeProperties.schema = 'dev';
-    if (options.wrongQaSourceSecret && key === 'linkedServices/ls_sql_source_qa')
-      item.properties.typeProperties.password.secretName = 'wrong';
-    if (options.wrongQaDestinationSecret && key === 'linkedServices/ls_sql_destination_qa')
-      item.properties.typeProperties.password.secretName = 'wrong';
-    if (options.wrongQaSourceUser && key === 'linkedServices/ls_sql_source_qa')
-      item.properties.typeProperties.connectionString = item.properties.typeProperties.connectionString
-        .replace(/\buser\s*id\s*=\s*adf_qa_reader\b/i, 'user id=wrong');
     return JSON.stringify(item);
   };
   return { execute, calls, live, untouched };
@@ -181,10 +203,6 @@ for (const branch of ['dev', 'qa']) {
     const target = targetForEvent(envFor(branch));
     const originalScoped = before.template.resources.filter(resource => {
       const kind = resource.type.split('/').at(-1);
-      if (kind === 'linkedServices') {
-        const name = /\[concat\(parameters\('factoryName'\), '\/([^']+)'\)\]/.exec(resource.name)[1];
-        return deployableSourceLinkedServices.has(name);
-      }
       return ['datasets', 'pipelines'].includes(kind);
     });
 
@@ -198,7 +216,8 @@ for (const branch of ['dev', 'qa']) {
 
     for (const resource of template.resources) {
       assert.ok(resource.name.startsWith(target.factory + '/'));
-      assert.ok(['/datasets', '/pipelines', '/linkedServices'].some(kind => resource.type.endsWith(kind)));
+      assert.ok(['/datasets', '/pipelines'].some(kind => resource.type.endsWith(kind)));
+      assert.ok(resource.dependsOn.every(value => !/linkedServices|integrationRuntimes/.test(value)));
       if (resource.type.endsWith('/datasets'))
         assert.ok(resource.properties.linkedServiceName.referenceName.endsWith(`_${branch}`));
     }
@@ -214,17 +233,9 @@ for (const branch of ['dev', 'qa']) {
     const sqlSink = template.resources.find(resource => resource.name.endsWith('/SqlTable_destination_customers'));
     assert.equal(sqlSink.properties.typeProperties.schema, branch === 'qa' ? 'qa' : 'dev');
 
-    const sqlSourceLs = template.resources.find(resource => resource.name.endsWith('/ls_sql_source_' + branch));
-    const sqlDestinationLs = template.resources.find(resource => resource.name.endsWith('/ls_sql_destination_' + branch));
-    if (branch === 'qa') {
-      assert.match(sqlSourceLs.properties.typeProperties.connectionString, /\buser\s*id\s*=\s*adf_qa_reader\b/i);
-      assert.equal(sqlSourceLs.properties.typeProperties.password.secretName, sqlRuntimeSecrets.qa.sourceSecret);
-      assert.match(sqlDestinationLs.properties.typeProperties.connectionString, /\buser\s*id\s*=\s*adf_qa_writer\b/i);
-      assert.equal(sqlDestinationLs.properties.typeProperties.password.secretName, sqlRuntimeSecrets.qa.destinationSecret);
-    } else {
-      assert.match(sqlSourceLs.properties.typeProperties.connectionString, /\buser\s*id\s*=\s*adf_dev_reader\b/i);
-      assert.equal(sqlSourceLs.properties.typeProperties.password.secretName, sqlRuntimeSecrets.dev.sourceSecret);
-    }
+    const sqlSource = template.resources.find(resource => resource.name.endsWith('/SqlTable_source_customers'));
+    assert.equal(sqlSource.properties.linkedServiceName.referenceName, target.linkedServiceMap.ls_sql_source_dev);
+    assert.equal(sqlSink.properties.linkedServiceName.referenceName, target.linkedServiceMap.ls_sql_destination_dev);
   });
 
   test(`${branch}: preflight and verification only GET; unlisted live artifacts survive`, () => {
@@ -236,6 +247,37 @@ for (const branch of ['dev', 'qa']) {
     assert.equal(mock.live.get('pipelines/absent-from-git'), mock.untouched);
   });
 }
+
+test('Terraform-owned linked services never enter the artifact deployment', () => {
+  const source = exported();
+  source.template.resources.push({
+    type: `${prefix}/linkedServices`,
+    name: "[concat(parameters('factoryName'), '/another_external_service')]",
+    properties: { type: 'AzureKeyVault' },
+  });
+  const { template, parameters } = prepared('dev', source);
+  assert.equal(template.resources.length, 6);
+  assert.ok(template.resources.every(resource => /\/(datasets|pipelines)$/.test(resource.type)));
+  template.resources.push({
+    type: `${prefix}/linkedServices`,
+    name: 'adf-poc-dev-mk-001/ls_kv_dev',
+    properties: { type: 'AzureKeyVault' },
+  });
+  assert.throws(() => checkArtifacts(envFor('dev'), template, parameters, 'prepare',
+    () => assert.fail('Must reject before Azure access')), /allowed target\/scope/);
+});
+
+test('preflight validates full connection-string references without reading secret values', () => {
+  for (const branch of ['dev', 'qa']) {
+    const { template, parameters } = prepared(branch);
+    const mock = mockAzure(branch, template);
+    checkArtifacts(envFor(branch), template, parameters, 'prepare', mock.execute);
+    assert.ok(mock.calls.some(args => args.some(value => value.includes(`/linkedservices/ls_kv_${branch}?`))));
+    assert.ok(mock.calls.every(args => args[args.indexOf('--url') + 1].startsWith('https://management.azure.com/')));
+    assert.throws(() => checkArtifacts(envFor(branch), template, parameters, 'prepare',
+      mockAzure(branch, template, { crossEnvironmentSecret: true }).execute), /connection-string reference/);
+  }
+});
 
 test('event gates reject PR deployment, wrong PR base/head checkout and unsupported push refs', () => {
   const pr = { GITHUB_EVENT_NAME: 'pull_request', GITHUB_BASE_REF: 'dev', GITHUB_REF: 'refs/pull/12/merge' };
@@ -385,13 +427,21 @@ test('target mismatch, CLI failures and post-deployment mapping failures fail cl
     [{ fail: true }, 'prepare', /Azure CLI failed/],
     [{ wrongRuntime: true }, 'prepare', /must use ir-azure-qa/],
     [{ wrongKeyVaultType: true }, 'prepare', /must be an AzureKeyVault linked service/],
+    [{ missingLinkedService: true }, 'prepare', /Linked service missing/],
+    [{ wrongSqlType: true }, 'prepare', /Wrong QA SQL source connection-string reference/],
+    [{ wrongSecretType: true }, 'prepare', /Wrong QA SQL source connection-string reference/],
+    [{ wrongVaultReference: true }, 'prepare', /Wrong target Key Vault reference/],
+    [{ missingConnection: true }, 'prepare', /connection-string reference/],
+    [{ unsupportedConnection: true }, 'prepare', /connection-string reference/],
+    [{ redactedConnection: true }, 'prepare', /connection-string reference/],
+    [{ inlineConnection: true }, 'prepare', /connection-string reference/],
+    [{ legacyPassword: true }, 'prepare', /connection-string reference/],
     [{ missing: true }, 'verify', /missing after deployment/],
     [{ wrongService: true }, 'verify', /Wrong target linked service/],
     [{ wrongPath: true }, 'verify', /Wrong QA output path/],
     [{ wrongSchema: true }, 'verify', /Wrong QA SQL destination schema/],
-    [{ wrongQaSourceSecret: true }, 'verify', /Wrong QA SQL source credentials mapping/],
-    [{ wrongQaDestinationSecret: true }, 'verify', /Wrong QA SQL destination credentials mapping/],
-    [{ wrongQaSourceUser: true }, 'verify', /Wrong QA SQL source credentials mapping/],
+    [{ wrongSourceSecret: true }, 'prepare', /Wrong QA SQL source connection-string reference/],
+    [{ wrongDestinationSecret: true }, 'prepare', /Wrong QA SQL destination connection-string reference/],
   ]) assert.throws(() => checkArtifacts(envFor('qa'), template, parameters, phase,
     mockAzure('qa', template, options).execute), error);
 });
