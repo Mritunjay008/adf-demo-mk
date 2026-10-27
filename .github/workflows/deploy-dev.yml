@@ -7,7 +7,7 @@ on:
     branches: [dev, qa]
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   SUBSCRIPTION: 4d070b73-30f5-482d-9606-75f6f000330f
