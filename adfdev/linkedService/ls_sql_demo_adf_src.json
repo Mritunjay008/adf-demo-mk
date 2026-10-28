@@ -1,0 +1,21 @@
+{
+	"name": "ls_sql_demo_adf_src",
+	"properties": {
+		"annotations": [],
+		"type": "AzureSqlDatabase",
+		"typeProperties": {
+			"connectionString": {
+				"type": "AzureKeyVaultSecret",
+				"store": {
+					"referenceName": "ls_kv_dev",
+					"type": "LinkedServiceReference"
+				},
+				"secretName": "sql-dev-source-connection-string"
+			}
+		},
+		"connectVia": {
+			"referenceName": "ir-azure-dev",
+			"type": "IntegrationRuntimeReference"
+		}
+	}
+}

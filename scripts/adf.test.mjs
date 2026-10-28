@@ -451,13 +451,15 @@ test('workflow enables only Dev/QA push deployment while keeping PR validation r
   assert.match(workflow, /pull_request:\s+branches: \[dev\]/);
   assert.match(workflow, /push:\s+branches: \[dev, qa\]/);
   const [beforeJobs, jobs] = workflow.split('\njobs:\n');
+  assert.match(beforeJobs, /^permissions:\n  contents: read\n/m);
   assert.doesNotMatch(beforeJobs, /id-token|write/);
   const [validation, deployment] = jobs.split('\n  deploy:\n');
   assert.match(validation, /if: github.event_name == 'pull_request' && github.base_ref == 'dev'/);
+  assert.match(validation, /^    permissions:\n      contents: read\n    steps:/m);
   assert.doesNotMatch(validation, /azure\/|id-token|check-adf|secrets\.|persist-credentials:\s*true/);
   assert.match(deployment, /^    if: github.event_name == 'push' && \(github.ref == 'refs\/heads\/dev' \|\| github.ref == 'refs\/heads\/qa'\)$/m);
   assert.doesNotMatch(deployment, /if:\s*false\s*&&/);
-  assert.match(deployment, /id-token: write/);
+  assert.match(deployment, /^    permissions:\n      contents: read\n      id-token: write\n    concurrency:/m);
   assert.match(deployment, /group: adf-\$\{\{ github.ref_name \}\}-deployment/);
   assert.equal((deployment.match(/uses: azure\/bicep-deploy@v2/g) || []).length, 2);
   assert.equal((deployment.match(/type: deployment\n/g) || []).length, 2);

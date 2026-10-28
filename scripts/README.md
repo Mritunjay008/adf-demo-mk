@@ -11,6 +11,12 @@ permission, no Azure login and no deployment. When ADF source JSON exists,
 export requires network access to npm and Microsoft's public ADF utility bundle,
 but no Azure deployment credentials.
 
+The workflow default and both existing jobs use `contents: read`; no job needs
+to push repository changes. Only the deployment job adds `id-token: write`
+for Azure OIDC. The safeguard test enforces the read-only default and these
+job-level boundaries. Workflow token permissions do not authorize ADF Studio
+to commit to GitHub.
+
 Deployment enablement was explicitly approved after the OIDC identity and
 scoped Azure permissions were configured. The deployment job permits only
 pushes to `dev`/`qa`; feature pushes and PRs cannot enter it. Merge the reviewed
