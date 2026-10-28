@@ -7,7 +7,7 @@ on:
     branches: [dev, qa]
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   SUBSCRIPTION: 4d070b73-30f5-482d-9606-75f6f000330f
@@ -19,6 +19,8 @@ jobs:
     if: github.event_name == 'pull_request' && github.base_ref == 'dev'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       # The default PR checkout is the proposed merge, not the feature head alone.
       - uses: actions/checkout@v4
